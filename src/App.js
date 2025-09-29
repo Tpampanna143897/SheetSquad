@@ -1,107 +1,154 @@
 import React, { useState } from "react";
-import "bootstrap/dist/css/bootstrap.min.css";
+import JSZip from "jszip";
+import * as XLSX from "xlsx";
 
-function App() {
+export default function App() {
   const [files, setFiles] = useState([]);
-  const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  // Customize this function to filter unwanted rows
+  function isRowValid(row) {
+    // Example: exclude rows where any cell contains a URL (http:// or https://)
+    return !Object.values(row).some(
+      (val) =>
+        typeof val === "string" &&
+        (val.includes("http://") || val.includes("https://"))
+    );
+  }
+
+  // Optional: Remove duplicate rows based on JSON string equality
+  function removeDuplicates(rows) {
+    const seen = new Set();
+    return rows.filter((row) => {
+      const key = JSON.stringify(row);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
 
   const handleFileChange = (e) => {
     setFiles(Array.from(e.target.files));
     setMessage("");
   };
 
-  const handleUpload = async () => {
+  const mergeExcelData = async () => {
     if (files.length === 0) {
       setMessage("Please select ZIP files first!");
       return;
     }
-
-    setUploading(true);
+    setLoading(true);
     setMessage("");
-    const formData = new FormData();
-    files.forEach(file => formData.append("file", file)); // ✅ use "file"
 
     try {
-      const response = await fetch("https://sheetsquadbackend.onrender.com/upload-zip", {
-        method: "POST",
-        body: formData,
+      let allRows = [];
+      let allHeadersSet = new Set();
+
+      for (const file of files) {
+        const zip = await JSZip.loadAsync(file);
+        const excelFiles = Object.keys(zip.files).filter(
+          (f) => f.endsWith(".xlsx") || f.endsWith(".xls")
+        );
+
+        for (const filename of excelFiles) {
+          const fileData = await zip.files[filename].async("arraybuffer");
+          const workbook = XLSX.read(fileData, { type: "array" });
+          const sheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[sheetName];
+          const jsonData = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
+
+          // Filter unwanted rows
+          const filteredData = jsonData.filter(isRowValid);
+
+          // Collect headers from filtered rows
+          filteredData.forEach((row) =>
+            Object.keys(row).forEach((h) => allHeadersSet.add(h))
+          );
+
+          allRows = allRows.concat(filteredData);
+        }
+      }
+
+      // Normalize rows with all headers
+      const allHeaders = Array.from(allHeadersSet);
+      const normalizedRows = allRows.map((row) => {
+        const newRow = {};
+        allHeaders.forEach((h) => {
+          newRow[h] = row[h] !== undefined ? row[h] : "";
+        });
+        return newRow;
       });
 
-      if (!response.ok) throw new Error(`Server error: ${response.statusText}`);
+      // Remove duplicates (optional)
+      const uniqueRows = removeDuplicates(normalizedRows);
 
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
+      // Convert to CSV
+      const csv = XLSX.utils.sheet_to_csv(
+        XLSX.utils.json_to_sheet(uniqueRows, { header: allHeaders })
+      );
+
+      // Trigger download
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "merged.csv"; // ✅ CSV download
-      document.body.appendChild(a);
+      a.download = "merged.csv";
       a.click();
-      a.remove();
+      URL.revokeObjectURL(url);
 
-      setMessage("Files merged and downloaded successfully!");
+      setMessage("Merged CSV downloaded successfully!");
       setFiles([]);
     } catch (err) {
       console.error(err);
-      setMessage("Upload failed: " + err.message);
+      setMessage("Error merging files: " + err.message);
     } finally {
-      setUploading(false);
+      setLoading(false);
     }
   };
 
   return (
-    <div className="container mt-5">
-      <div className="card p-4 shadow">
-        <h3 className="card-title mb-3">Upload ZIP Files (with Excel files inside)</h3>
+    <div style={{ maxWidth: 600, margin: "50px auto", fontFamily: "Arial" }}>
+      <h2>Upload ZIP files containing Excel to merge (frontend only)</h2>
 
-        <div className="mb-3">
-          <label htmlFor="fileInput" className="form-label">Select ZIP Files:</label>
-          <input
-            id="fileInput"
-            type="file"
-            multiple
-            accept=".zip"
-            className="form-control"
-            onChange={handleFileChange}
-            disabled={uploading}
-          />
+      <input
+        type="file"
+        multiple
+        accept=".zip"
+        onChange={handleFileChange}
+        disabled={loading}
+      />
+
+      {files.length > 0 && (
+        <div style={{ marginTop: 20 }}>
+          <h4>Selected Files:</h4>
+          <ul>
+            {files.map((f, i) => (
+              <li key={i}>
+                {f.name} - {(f.size / 1024 / 1024).toFixed(2)} MB
+              </li>
+            ))}
+          </ul>
         </div>
+      )}
 
-        {files.length > 0 && (
-          <div className="mb-3">
-            <h5>Selected Files:</h5>
-            <ul className="list-group">
-              {files.map((f, i) => (
-                <li key={i} className="list-group-item d-flex justify-content-between align-items-center">
-                  {f.name}
-                  <span className="badge bg-primary rounded-pill">{(f.size / 1024 / 1024).toFixed(2)} MB</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
+      <button
+        onClick={mergeExcelData}
+        disabled={loading || files.length === 0}
+        style={{
+          marginTop: 20,
+          padding: "10px 20px",
+          cursor: loading ? "not-allowed" : "pointer",
+        }}
+      >
+        {loading ? "Merging..." : "Merge & Download CSV"}
+      </button>
 
-        <button
-          className="btn btn-success"
-          onClick={handleUpload}
-          disabled={uploading || files.length === 0}
-        >
-          {uploading ? (
-            <>
-              <span className="spinner-border spinner-border-sm me-2"></span>
-              Uploading...
-            </>
-          ) : "Upload & Merge"}
-        </button>
-
-        {message && (
-          <div className="alert alert-info mt-3" role="alert">
-            {message}
-          </div>
-        )}
-      </div>
+      {message && (
+        <p style={{ marginTop: 20, color: "green", fontWeight: "bold" }}>
+          {message}
+        </p>
+      )}
     </div>
   );
 }
-
-export default App;
