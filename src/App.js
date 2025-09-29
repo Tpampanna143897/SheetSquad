@@ -23,7 +23,7 @@ function App() {
     files.forEach(file => formData.append("file", file)); // ✅ use "file"
 
     try {
-      const response = await fetch("http://localhost:5000/upload-zip", {
+      const response = await fetch("https://sheetsquadbackend.onrender.com/upload-zip", {
         method: "POST",
         body: formData,
       });
