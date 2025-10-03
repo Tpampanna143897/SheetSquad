@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import JSZip from "jszip";
 import * as XLSX from "xlsx";
 
@@ -6,19 +6,21 @@ export default function App() {
   const [files, setFiles] = useState([]);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
+  const [displayData, setDisplayData] = useState([]);
+  const [totalFiles, setTotalFiles] = useState(0);
+  const [currentFileIndex, setCurrentFileIndex] = useState(0);
 
-  // Customize this function to filter unwanted rows
-  function isRowValid(row) {
-    // Example: exclude rows where any cell contains a URL (http:// or https://)
+  const allRowsRef = useRef([]); // ✅ full dataset here
+
+  const isRowValid = (row) => {
     return !Object.values(row).some(
       (val) =>
         typeof val === "string" &&
         (val.includes("http://") || val.includes("https://"))
     );
-  }
+  };
 
-  // Optional: Remove duplicate rows based on JSON string equality
-  function removeDuplicates(rows) {
+  const removeDuplicates = (rows) => {
     const seen = new Set();
     return rows.filter((row) => {
       const key = JSON.stringify(row);
@@ -26,11 +28,46 @@ export default function App() {
       seen.add(key);
       return true;
     });
-  }
+  };
 
   const handleFileChange = (e) => {
     setFiles(Array.from(e.target.files));
     setMessage("");
+    setDisplayData([]);
+    setCurrentFileIndex(0);
+    setTotalFiles(e.target.files.length);
+    allRowsRef.current = []; // ✅ reset full data
+  };
+
+  const processFile = async (file) => {
+    const zip = await JSZip.loadAsync(file);
+    const excelFiles = Object.keys(zip.files).filter(
+      (f) => f.endsWith(".xlsx") || f.endsWith(".xls")
+    );
+
+    for (const filename of excelFiles) {
+      const fileData = await zip.files[filename].async("arraybuffer");
+      const workbook = XLSX.read(fileData, { type: "array" });
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+      const jsonData = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
+
+      const filteredData = jsonData.filter(isRowValid);
+
+      // ✅ Add all data to the ref (not state)
+      allRowsRef.current = allRowsRef.current.concat(filteredData);
+
+      // ✅ Add preview to UI (first 500 rows max)
+      if (displayData.length < 500) {
+        const remainingSlots = 500 - displayData.length;
+        const toAdd = filteredData.slice(0, remainingSlots);
+        if (toAdd.length > 0) {
+          setDisplayData((prev) => [...prev, ...toAdd]);
+        }
+      }
+
+      setMessage(`Processed file: ${filename}`);
+    }
   };
 
   const mergeExcelData = async () => {
@@ -38,57 +75,29 @@ export default function App() {
       setMessage("Please select ZIP files first!");
       return;
     }
+
     setLoading(true);
-    setMessage("");
+    setMessage("Processing files...");
 
     try {
-      let allRows = [];
-      let allHeadersSet = new Set();
-
       for (const file of files) {
-        const zip = await JSZip.loadAsync(file);
-        const excelFiles = Object.keys(zip.files).filter(
-          (f) => f.endsWith(".xlsx") || f.endsWith(".xls")
-        );
-
-        for (const filename of excelFiles) {
-          const fileData = await zip.files[filename].async("arraybuffer");
-          const workbook = XLSX.read(fileData, { type: "array" });
-          const sheetName = workbook.SheetNames[0];
-          const worksheet = workbook.Sheets[sheetName];
-          const jsonData = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
-
-          // Filter unwanted rows
-          const filteredData = jsonData.filter(isRowValid);
-
-          // Collect headers from filtered rows
-          filteredData.forEach((row) =>
-            Object.keys(row).forEach((h) => allHeadersSet.add(h))
-          );
-
-          allRows = allRows.concat(filteredData);
-        }
+        await processFile(file);
+        setCurrentFileIndex((prev) => prev + 1);
       }
 
-      // Normalize rows with all headers
-      const allHeaders = Array.from(allHeadersSet);
-      const normalizedRows = allRows.map((row) => {
-        const newRow = {};
-        allHeaders.forEach((h) => {
-          newRow[h] = row[h] !== undefined ? row[h] : "";
-        });
-        return newRow;
-      });
+      // ✅ Use ref to access all data
+      const allData = removeDuplicates(allRowsRef.current);
 
-      // Remove duplicates (optional)
-      const uniqueRows = removeDuplicates(normalizedRows);
+      if (allData.length === 0) {
+        setMessage("No valid data found.");
+        setLoading(false);
+        return;
+      }
 
-      // Convert to CSV
-      const csv = XLSX.utils.sheet_to_csv(
-        XLSX.utils.json_to_sheet(uniqueRows, { header: allHeaders })
-      );
+      const allHeaders = Object.keys(allData[0]);
+      const worksheet = XLSX.utils.json_to_sheet(allData, { header: allHeaders });
+      const csv = XLSX.utils.sheet_to_csv(worksheet);
 
-      // Trigger download
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -97,8 +106,7 @@ export default function App() {
       a.click();
       URL.revokeObjectURL(url);
 
-      setMessage("Merged CSV downloaded successfully!");
-      setFiles([]);
+      setMessage(`Downloaded ${allData.length.toLocaleString()} rows as CSV!`);
     } catch (err) {
       console.error(err);
       setMessage("Error merging files: " + err.message);
@@ -109,7 +117,7 @@ export default function App() {
 
   return (
     <div style={{ maxWidth: 600, margin: "50px auto", fontFamily: "Arial" }}>
-      <h2>Upload ZIP files containing Excel to merge (frontend only)</h2>
+      <h2>Merge Excel from ZIP (Chrome Supported)</h2>
 
       <input
         type="file"
@@ -124,9 +132,7 @@ export default function App() {
           <h4>Selected Files:</h4>
           <ul>
             {files.map((f, i) => (
-              <li key={i}>
-                {f.name} - {(f.size / 1024 / 1024).toFixed(2)} MB
-              </li>
+              <li key={i}>{f.name} - {(f.size / 1024 / 1024).toFixed(2)} MB</li>
             ))}
           </ul>
         </div>
@@ -148,6 +154,32 @@ export default function App() {
         <p style={{ marginTop: 20, color: "green", fontWeight: "bold" }}>
           {message}
         </p>
+      )}
+
+      {displayData.length > 0 && (
+        <>
+          <h4>Preview (First {displayData.length} Rows)</h4>
+          <div style={{ maxHeight: 300, overflowY: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr>
+                  {Object.keys(displayData[0]).map((key) => (
+                    <th key={key} style={{ border: "1px solid #ccc", padding: 4 }}>{key}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {displayData.map((row, idx) => (
+                  <tr key={idx}>
+                    {Object.values(row).map((val, i) => (
+                      <td key={i} style={{ border: "1px solid #ccc", padding: 4 }}>{val}</td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
     </div>
   );
